@@ -1,0 +1,26 @@
+# Python Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Mock test data (generated during testing)
+mock_addresses.csv
+mock_polygons.*
+geocoded_addresses.csv
+validation_results.*
+validation_output*
+mock_polygons.cpg
+mock_polygons.dbf
+mock_polygons.prj
+mock_polygons.shp
+mock_polygons.shx
+
+# OS generated files
+.DS_Store
+Thumbs.db

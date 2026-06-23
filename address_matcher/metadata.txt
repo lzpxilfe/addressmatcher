@@ -1,0 +1,12 @@
+[general]
+name=Address Matcher & Validator
+qgisMinimumVersion=3.0
+description=한국 주소 CSV 지오코딩 및 유적 Polygon 경계 이탈 검증/보정 도구
+version=0.1.0
+author=Antigravity
+email=antigravity@gemini.ai
+about=주소가 기입된 CSV를 지오코딩하여 점으로 바꾸고, 기존 SHP 파일과 대조하여 경계를 벗어난 대표 필지 주소를 탐지/수정합니다.
+tracker=
+repository=
+icon=icon.png
+category=Vector
