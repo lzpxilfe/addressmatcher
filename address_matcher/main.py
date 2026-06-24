@@ -2,6 +2,7 @@ import os
 import csv
 import requests
 import time
+import re
 from PyQt5.QtCore import Qt, QVariant, QCoreApplication
 from PyQt5.QtWidgets import QAction, QMessageBox, QProgressDialog
 from PyQt5.QtGui import QIcon, QColor
@@ -46,17 +47,35 @@ class AddressMatcherPlugin:
         self.iface.removePluginVectorMenu("Address Matcher & Validator", self.action)
         self.iface.removeVectorToolBarIcon(self.action)
 
-    def geocode_address(self, address, api_key):
+    def clean_address_text(self, address):
         """
-        카카오 API를 통해 단일 주소 지오코딩 수행 (Requests 활용)
+        주소 끝에 붙는 불필요한 지적 수식어('외 X필지', '일원' 등)를 지우고 산 지번 공백을 맞추는 전처리 함수
         """
-        if not address or address.strip() == "":
-            return None, None, "EMPTY_ADDRESS"
-            
-        url = "https://dapi.kakao.com/v2/local/search/address.json"
-        headers = {"Authorization": f"KakaoAK {api_key}"}
-        params = {"query": address.strip()}
+        if not address or not isinstance(address, str):
+            return ""
+        addr = address.strip()
+        addr = re.sub(r"\([^)]*\)", "", addr)
+        addr = re.sub(r"\[[^\]]*\]", "", addr)
         
+        patterns = [
+            r"\s*외\s*\d+\s*필지.*",
+            r"\s*외\s*필지.*",
+            r"\s*일원.*",
+            r"\s*일대.*",
+            r"\s*주변.*",
+            r"\s*부근.*",
+            r"\s*번지\s*일원.*",
+            r"\s*번지.*"
+        ]
+        for pat in patterns:
+            addr = re.sub(pat, "", addr)
+            
+        addr = re.sub(r"산\s*(\d+)", r"산 \1", addr)
+        return re.sub(r"\s+", " ", addr).strip()
+
+    def _request_geocode(self, url, headers, query_addr):
+        """실제 HTTP 요청을 날리는 지오코딩 헬퍼 메서드"""
+        params = {"query": query_addr.strip()}
         try:
             response = requests.get(url, headers=headers, params=params, timeout=10)
             if response.status_code == 200:
@@ -68,12 +87,47 @@ class AddressMatcherPlugin:
                     lat = float(doc.get("y"))
                     match_type = doc.get("address_type", "UNKNOWN")
                     return lon, lat, match_type
-                return None, None, "NO_MATCH"
-            elif response.status_code == 401:
-                return None, None, "UNAUTHORIZED"
-            return None, None, f"HTTP_{response.status_code}"
+            return None, None, "NO_MATCH"
         except Exception as e:
-            return None, None, f"ERROR_{str(e)[:20]}"
+            return None, None, f"ERR_{str(e)[:10]}"
+
+    def geocode_address(self, address, api_key):
+        """
+        지적도상 특이 지번 오류를 정정하기 위해 정규식 정제 및 
+        다단계 Fallback 지오코딩(정제주소 -> 본번지 -> 행정동 중심점)을 수행합니다.
+        """
+        if not address or address.strip() == "":
+            return None, None, "EMPTY_ADDRESS"
+            
+        url = "https://dapi.kakao.com/v2/local/search/address.json"
+        headers = {"Authorization": f"KakaoAK {api_key}"}
+        
+        # [1단계] 수식어가 정제된 원래 주소로 시도
+        cleaned = self.clean_address_text(address)
+        lon, lat, status = self._request_geocode(url, headers, cleaned)
+        if lon is not None:
+            return lon, lat, status
+            
+        # [2단계] 본번지 폴백 시도 (가지번 제거)
+        fallback_addr = None
+        if re.search(r"(\s+\d+)-\d+$", cleaned):
+            fallback_addr = re.sub(r"(\s+\d+)-\d+$", r"\1", cleaned)
+        elif re.search(r"(\s+산\s*\d+)-\d+$", cleaned):
+            fallback_addr = re.sub(r"(\s+산\s*\d+)-\d+$", r"\1", cleaned)
+            
+        if fallback_addr and fallback_addr != cleaned:
+            lon, lat, status = self._request_geocode(url, headers, fallback_addr)
+            if lon is not None:
+                return lon, lat, "FALLBACK_MAIN_JIBUN"
+                
+        # [3단계] 번지를 아예 제거하고 읍/면/동/리 대표 지점으로 폴백 검색
+        fallback_town = re.sub(r"(\s+산)?\s+\d+.*$", "", cleaned).strip()
+        if fallback_town and fallback_town != cleaned:
+            lon, lat, status = self._request_geocode(url, headers, fallback_town)
+            if lon is not None:
+                return lon, lat, "FALLBACK_TOWN"
+                
+        return None, None, "FAIL"
 
     def run(self):
         dlg = AddressMatcherDialog(self.iface.mainWindow())

@@ -1,8 +1,46 @@
 import os
 import time
 import requests
+import re
 import pandas as pd
 from typing import Optional, Tuple, Dict, Any
+
+def clean_address_text(address: str) -> str:
+    """
+    주소 텍스트 끝에 붙는 '외 X필지', '일원' 등의 지적도상의 불필요한 단어를 지우고,
+    산 지번의 띄어쓰기를 규격화하는 정형화(Cleansing) 전처리 함수
+    """
+    if not address or not isinstance(address, str):
+        return ""
+        
+    addr = address.strip()
+    
+    # 1. 괄호로 묶인 부가 정보 제거 (예: "(동천동)", "[일부]")
+    addr = re.sub(r"\([^)]*\)", "", addr)
+    addr = re.sub(r"\[[^\]]*\]", "", addr)
+    
+    # 2. 주소 끝부분의 수식용 기호 및 텍스트 제거
+    # '외 X필지', '외 필지', '일원', '일대', '주변', '부근', '번지 일원' 등
+    patterns_to_remove = [
+        r"\s*외\s*\d+\s*필지.*",
+        r"\s*외\s*필지.*",
+        r"\s*일원.*",
+        r"\s*일대.*",
+        r"\s*주변.*",
+        r"\s*부근.*",
+        r"\s*번지\s*일원.*",
+        r"\s*번지.*" # 단독 번지 글자 제거 (숫자는 보존)
+    ]
+    for pattern in patterns_to_remove:
+        addr = re.sub(pattern, "", addr)
+        
+    # 3. '산20'과 '산 20' 공백 규격화 (카카오 로컬 API 대응성 제고)
+    addr = re.sub(r"산\s*(\d+)", r"산 \1", addr)
+    
+    # 4. 여러 개의 공백을 단일 공백으로 치환
+    addr = re.sub(r"\s+", " ", addr).strip()
+    
+    return addr
 
 class KakaoGeocoder:
     """
@@ -34,7 +72,6 @@ class KakaoGeocoder:
                     data = response.json()
                     documents = data.get("documents", [])
                     if documents:
-                        # 첫 번째 검색 결과 매칭
                         doc = documents[0]
                         lon = float(doc.get("x"))
                         lat = float(doc.get("y"))
@@ -57,6 +94,41 @@ class KakaoGeocoder:
         
         return None, None, "NETWORK_ERROR"
 
+    def geocode_with_fallback(self, address: str) -> Tuple[Optional[float], Optional[float], str]:
+        """
+        주소 정제 후 지오코딩 실패 시 본번지 검색, 리/동 중심점 검색으로 
+        단계별 축소(Fallback) 검색을 수행하여 최종 지오코딩 실패율을 낮춥니다.
+        """
+        # [1단계] 정제된 정밀 주소로 1차 검색
+        cleaned_addr = clean_address_text(address)
+        lon, lat, match_type = self.geocode(cleaned_addr)
+        if lon is not None:
+            return lon, lat, match_type
+            
+        # [2단계] 가지번 제거 후 본번지 검색 (예: 123-45 ➔ 123, 산 23-4 ➔ 산 23)
+        # 지번 뒷부분의 하이픈과 가지번호 제거
+        fallback_addr = None
+        if re.search(r"(\s+\d+)-\d+$", cleaned_addr):
+            fallback_addr = re.sub(r"(\s+\d+)-\d+$", r"\1", cleaned_addr)
+        elif re.search(r"(\s+산\s*\d+)-\d+$", cleaned_addr):
+            fallback_addr = re.sub(r"(\s+산\s*\d+)-\d+$", r"\1", cleaned_addr)
+            
+        if fallback_addr and fallback_addr != cleaned_addr:
+            lon, lat, match_type = self.geocode(fallback_addr)
+            if lon is not None:
+                return lon, lat, "FALLBACK_MAIN_JIBUN"
+                
+        # [3단계] 지번 전체 제거 후 동/리 중심점 검색 (예: 경주시 내남면 용장리 123 ➔ 경주시 내남면 용장리)
+        # 주소 문자열에서 공백과 숫자(번지)가 시작되는 부분부터 문자열 끝까지 제거
+        fallback_town = re.sub(r"(\s+산)?\s+\d+.*$", "", cleaned_addr).strip()
+        
+        if fallback_town and fallback_town != cleaned_addr:
+            lon, lat, match_type = self.geocode(fallback_town)
+            if lon is not None:
+                return lon, lat, "FALLBACK_TOWN"
+                
+        return None, None, "FAIL"
+
 def geocode_csv(
     input_csv_path: str,
     output_csv_path: str,
@@ -65,7 +137,7 @@ def geocode_csv(
     delay_sec: float = 0.1
 ) -> pd.DataFrame:
     """
-    주소 CSV 파일을 읽어 지오코딩을 수행하고, 위경도 좌표 컬럼을 추가하여 새 CSV로 저장합니다.
+    주소 CSV 파일을 읽어 다단계 Fallback 지오코딩을 수행하고, 결과를 CSV로 저장합니다.
     """
     print(f"Reading CSV file: {input_csv_path}")
     df = pd.read_csv(input_csv_path)
@@ -80,11 +152,11 @@ def geocode_csv(
     match_types = []
 
     total_rows = len(df)
-    print(f"Starting geocoding for {total_rows} rows...")
+    print(f"Starting geocoding with fallback for {total_rows} rows...")
 
     for idx, row in df.iterrows():
         address = row[address_column]
-        lon, lat, match_type = geocoder.geocode(address)
+        lon, lat, match_type = geocoder.geocode_with_fallback(address)
         
         longitudes.append(lon)
         latitudes.append(lat)
@@ -111,10 +183,8 @@ def geocode_csv(
     return df
 
 if __name__ == "__main__":
-    # 간단한 단독 실행 테스트용
     import sys
     
-    # 기본 테스트 키 설정
     DEFAULT_API_KEY = "965ffae72ca50570426f717a4c282e08"
     
     if len(sys.argv) < 4:
@@ -127,3 +197,4 @@ if __name__ == "__main__":
         api_key = sys.argv[4] if len(sys.argv) > 4 else DEFAULT_API_KEY
         
         geocode_csv(in_csv, out_csv, addr_col, api_key)
+
