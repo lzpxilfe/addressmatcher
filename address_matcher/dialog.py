@@ -195,6 +195,20 @@ class AddressMatcherDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         self.form_layout.addRow(self.create_label("Kakao REST API Key:"), self.api_key_edit)
         
+        # 2-8. 실시간 지적 경계 다운로드 체크박스 추가
+        self.cadastral_checkbox = QCheckBox("실시간 지적 경계선(지적도) 자동 다운로드")
+        saved_cad_checked = self.settings.value("AddressMatcher/cadastral_enabled", "false") == "true"
+        self.cadastral_checkbox.setChecked(saved_cad_checked)
+        self.cadastral_checkbox.toggled.connect(self.toggle_cadastral_fields)
+        self.form_layout.addRow("", self.cadastral_checkbox)
+        
+        # 2-9. Vworld API Key
+        saved_vworld_key = self.settings.value("AddressMatcher/vworld_api_key", "")
+        self.vworld_key_edit = QLineEdit(saved_vworld_key)
+        self.vworld_key_edit.setPlaceholderText("Vworld 인증키 (체크 시 필수)")
+        self.vworld_key_edit.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.form_layout.addRow(self.create_label("Vworld API Key:", "vworld_key"), self.vworld_key_edit)
+        
         # 2-8. 출력 파일 경로 접두사
         self.output_layout = QHBoxLayout()
         self.output_layout.setSpacing(6)
@@ -267,6 +281,7 @@ class AddressMatcherDialog(QDialog):
             
         # 첫 화면에 필드 활성화 상태 반영
         self.toggle_validation_fields(self.validation_checkbox.isChecked())
+        self.toggle_cadastral_fields(self.cadastral_checkbox.isChecked())
 
     def create_label(self, text, object_name=None):
         label = QLabel(text)
@@ -291,6 +306,14 @@ class AddressMatcherDialog(QDialog):
         for lbl in [lbl_csv_id, lbl_layer, lbl_shp_id]:
             if lbl:
                 lbl.setStyleSheet(f"font-weight: bold; font-size: 11px; {opacity_style}")
+
+    def toggle_cadastral_fields(self, enabled):
+        """체크박스 상태에 따라 Vworld API 입력란을 활성화/비활성화합니다."""
+        self.vworld_key_edit.setEnabled(enabled)
+        opacity_style = "color: #2D3748;" if enabled else "color: #A0AEC0;"
+        lbl_vworld = self.findChild(QLabel, "lbl_vworld_key")
+        if lbl_vworld:
+            lbl_vworld.setStyleSheet(f"font-weight: bold; font-size: 11px; {opacity_style}")
 
     def on_csv_path_changed(self, file_path):
         """CSV 경로가 바뀌면 파일을 신속하게 파싱하여 콤보박스에 컬럼을 주입합니다."""
@@ -389,6 +412,12 @@ class AddressMatcherDialog(QDialog):
                 QMessageBox.warning(self, "입력 오류", "SHP ID 필드명을 입력해 주세요.")
                 return
                 
+        # 지적도 다운로드 모드가 켜진 경우 브이월드 키 필수값 체크
+        if self.cadastral_checkbox.isChecked():
+            if not self.vworld_key_edit.text().strip():
+                QMessageBox.warning(self, "입력 오류", "지적도 다운로드를 위해 Vworld API Key를 입력해 주세요.")
+                return
+                
         self.accept()
 
     def get_values(self):
@@ -400,5 +429,7 @@ class AddressMatcherDialog(QDialog):
             "layer": self.layer_combo.currentLayer() if self.validation_checkbox.isChecked() else None,
             "shp_id_col": self.shp_id_col_edit.text() if self.validation_checkbox.isChecked() else "",
             "api_key": self.api_key_edit.text(),
+            "cadastral_enabled": self.cadastral_checkbox.isChecked(),
+            "vworld_api_key": self.vworld_key_edit.text(),
             "output_prefix": self.output_edit.text()
         }

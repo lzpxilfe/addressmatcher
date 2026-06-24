@@ -3,6 +3,7 @@ import csv
 import requests
 import time
 import re
+import json
 from PyQt5.QtCore import Qt, QVariant, QCoreApplication
 from PyQt5.QtWidgets import QAction, QMessageBox, QProgressDialog
 from PyQt5.QtGui import QIcon, QColor
@@ -11,10 +12,12 @@ from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, 
     QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
     QgsField, QgsFeatureRequest, QgsSymbol, QgsSingleSymbolRenderer,
-    QgsSimpleMarkerSymbolLayerBase, QgsSettings, QgsMessageLog, Qgis
+    QgsSimpleMarkerSymbolLayerBase, QgsSettings, QgsMessageLog, Qgis,
+    QgsFillSymbol
 )
 
 from .dialog import AddressMatcherDialog
+from .vworld_wfs import get_cadastral_polygon
 
 class AddressMatcherPlugin:
     def __init__(self, iface):
@@ -141,6 +144,8 @@ class AddressMatcherPlugin:
             poly_layer = values["layer"]
             shp_id_col = values["shp_id_col"]
             api_key = values["api_key"]
+            cadastral_enabled = values["cadastral_enabled"]
+            vworld_api_key = values["vworld_api_key"]
             output_prefix = values["output_prefix"]
             
             # 사용자 설정을 QgsSettings에 저장 (하드코딩 방지 및 편의성 제공)
@@ -151,6 +156,8 @@ class AddressMatcherPlugin:
             settings.setValue("AddressMatcher/csv_id_col", csv_id_col)
             settings.setValue("AddressMatcher/shp_id_col", shp_id_col)
             settings.setValue("AddressMatcher/api_key", api_key)
+            settings.setValue("AddressMatcher/cadastral_enabled", "true" if cadastral_enabled else "false")
+            settings.setValue("AddressMatcher/vworld_api_key", vworld_api_key)
             settings.setValue("AddressMatcher/output_prefix", output_prefix)
             
             # 1. CSV 로드 및 지오코딩 수행
@@ -173,6 +180,8 @@ class AddressMatcherPlugin:
             progress.setMinimumDuration(0) # 즉시 표시
             progress.setValue(0)
             
+            cadastral_features = []
+            
             for idx, row in enumerate(rows):
                 # 사용자가 취소를 눌렀을 경우 작업 중단
                 if progress.wasCanceled():
@@ -189,6 +198,20 @@ class AddressMatcherPlugin:
                 
                 if lon is not None:
                     success_count += 1
+                    # 지적도 기능 활성화된 경우 다운로드 수행
+                    if cadastral_enabled:
+                        progress.setLabelText(f"지적도를 다운로드 중... ({idx+1}/{total_rows})")
+                        QCoreApplication.processEvents()
+                        try:
+                            feat_data = get_cadastral_polygon(lon, lat, vworld_api_key)
+                            if feat_data:
+                                cadastral_features.append(feat_data)
+                        except Exception as e:
+                            QgsMessageLog.logMessage(
+                                f"지적도 다운로드 실패 - 주소: {addr}, 좌표: {lon},{lat}, 에러: {e}",
+                                "AddressMatcher",
+                                Qgis.Warning
+                            )
                 else:
                     # 지오코딩 실패한 경우 QGIS 로그 메시지 패널에 경고 작성
                     QgsMessageLog.logMessage(
@@ -198,6 +221,7 @@ class AddressMatcherPlugin:
                     )
                 
                 # 프로그레스바 상태 업데이트 및 QGIS UI 먹통 방지
+                progress.setLabelText(f"주소 지오코딩을 수행하고 있습니다... ({idx+1}/{total_rows})")
                 progress.setValue(idx + 1)
                 QCoreApplication.processEvents()
                 
@@ -262,6 +286,10 @@ class AddressMatcherPlugin:
                 symbol.setSize(3.5)
                 geocoded_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
                 
+                # 지적도 레이어 로드 (선택 사항)
+                if cadastral_enabled and cadastral_features:
+                    self.load_cadastral_layer(cadastral_features)
+
                 # 프로젝트 로드 및 줌인
                 QgsProject.instance().addMapLayer(geocoded_layer)
                 canvas = self.iface.mapCanvas()
@@ -390,6 +418,10 @@ class AddressMatcherPlugin:
             self.style_valid_layer(valid_layer)
             self.style_error_layer(error_layer)
             
+            # 지적도 레이어 로드 (선택 사항)
+            if cadastral_enabled and cadastral_features:
+                self.load_cadastral_layer(cadastral_features)
+
             # 프로젝트에 레이어 로드
             QgsProject.instance().addMapLayers([valid_layer, error_layer])
             
@@ -486,3 +518,58 @@ class AddressMatcherPlugin:
         renderer = QgsSingleSymbolRenderer(symbol)
         layer.setRenderer(renderer)
         layer.triggerRepaint()
+
+    def load_cadastral_layer(self, cadastral_features):
+        """
+        Vworld WFS를 통해 가져온 지적도 GeoJSON 피처 리스트를 QGIS 메모리 레이어로 띄우고 스타일링합니다.
+        """
+        if not cadastral_features:
+            return None
+            
+        cad_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "실제 주소 필지 경계 (지적도)", "memory")
+        cad_pr = cad_layer.dataProvider()
+        
+        # 필드 추가
+        cad_pr.addAttributes([
+            QgsField("pnu", QVariant.String),
+            QgsField("jibun", QVariant.String),
+            QgsField("addr", QVariant.String)
+        ])
+        cad_layer.updateFields()
+        
+        qgs_features = []
+        for feat_dict in cadastral_features:
+            geom_dict = feat_dict.get("geometry")
+            props = feat_dict.get("properties", {})
+            if geom_dict:
+                geom_json = json.dumps(geom_dict)
+                geom = QgsGeometry.fromJson(geom_json)
+                if not geom.isNull():
+                    feat = QgsFeature()
+                    feat.setFields(cad_layer.fields())
+                    feat.setGeometry(geom)
+                    
+                    pnu = props.get("pnu", "")
+                    jibun = props.get("jibun", "")
+                    addr = props.get("addr", "")
+                    
+                    feat.setAttributes([pnu, jibun, addr])
+                    qgs_features.append(feat)
+                    
+        cad_pr.addFeatures(qgs_features)
+        cad_layer.updateExtents()
+        
+        # 스타일링: 채움 투명, 테두리 주황색 점선
+        symbol = QgsFillSymbol.createSimple({
+            'color': '0,0,0,0',
+            'outline_color': '237,137,54',
+            'outline_style': 'dash',
+            'outline_width': '1.2'
+        })
+        renderer = QgsSingleSymbolRenderer(symbol)
+        cad_layer.setRenderer(renderer)
+        cad_layer.triggerRepaint()
+        
+        # 프로젝트에 레이어 로드
+        QgsProject.instance().addMapLayer(cad_layer)
+        return cad_layer
