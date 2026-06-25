@@ -152,13 +152,27 @@ class AddressMatcherPlugin:
             settings.setValue("AddressMatcher/output_prefix", output_prefix)
             
             rows = []
-            try:
-                with open(csv_path, 'r', encoding='utf-8-sig') as f:
-                    reader = csv.DictReader(f)
-                    for r in reader:
-                        rows.append(dict(r))
-            except Exception as e:
-                QMessageBox.critical(self.iface.mainWindow(), "에러", f"CSV 파일을 읽는 중 오류가 발생했습니다:\n{e}")
+            # 인코딩 자동 감지: utf-8-sig → cp949 → euc-kr → utf-8 순으로 시도
+            _encodings = ['utf-8-sig', 'cp949', 'euc-kr', 'utf-8']
+            _loaded = False
+            for _enc in _encodings:
+                try:
+                    with open(csv_path, 'r', encoding=_enc) as f:
+                        reader = csv.DictReader(f)
+                        for r in reader:
+                            rows.append(dict(r))
+                    _loaded = True
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    rows.clear()
+                    continue
+                except Exception as e:
+                    QMessageBox.critical(self.iface.mainWindow(), "에러", f"CSV 파일을 읽는 중 오류가 발생했습니다:\n{e}")
+                    return
+            if not _loaded:
+                QMessageBox.critical(self.iface.mainWindow(), "에러",
+                    "CSV 파일 인코딩을 자동으로 인식할 수 없습니다.\n"
+                    "파일을 UTF-8 (BOM 포함) 형식으로 다시 저장한 후 시도해 주세요.")
                 return
                 
             total_rows = len(rows)
