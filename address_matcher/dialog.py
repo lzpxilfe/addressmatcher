@@ -195,19 +195,29 @@ class AddressMatcherDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         self.form_layout.addRow(self.create_label("Kakao REST API Key:"), self.api_key_edit)
         
-        # 2-8. 실시간 지적 경계 다운로드 체크박스 추가
-        self.cadastral_checkbox = QCheckBox("실시간 지적 경계선(지적도) 자동 다운로드")
-        saved_cad_checked = self.settings.value("AddressMatcher/cadastral_enabled", "false") == "true"
-        self.cadastral_checkbox.setChecked(saved_cad_checked)
-        self.cadastral_checkbox.toggled.connect(self.toggle_cadastral_fields)
-        self.form_layout.addRow("", self.cadastral_checkbox)
+        # 구분선 3
+        self.line3 = QFrame()
+        self.line3.setFrameShape(QFrame.HLine)
+        self.line3.setFrameShadow(QFrame.Sunken)
+        self.line3.setStyleSheet("background-color: #E2E8F0; max-height: 1px; margin: 5px 0;")
+        self.form_layout.addRow(self.line3)
         
-        # 2-9. Vworld API Key
-        saved_vworld_key = self.settings.value("AddressMatcher/vworld_api_key", "")
-        self.vworld_key_edit = QLineEdit(saved_vworld_key)
-        self.vworld_key_edit.setPlaceholderText("Vworld 인증키 (체크 시 필수)")
-        self.vworld_key_edit.setEchoMode(QLineEdit.PasswordEchoOnEdit)
-        self.form_layout.addRow(self.create_label("Vworld API Key:", "vworld_key"), self.vworld_key_edit)
+        # 2-8. 폴리곤 대표점 생성 모드 체크박스
+        self.rep_point_checkbox = QCheckBox("폴리곤 대표점 생성 (SHP → 내부 보장 대표점)")
+        self.rep_point_checkbox.setToolTip(
+            "선택 시 CSV 지오코딩 없이, 아래 Polygon 레이어의 각 피처에 대해\n"
+            "pointOnSurface() 알고리즘으로 반드시 면 안에 찍히는 대표점을 생성합니다.\n"
+            "초승달형·오목 폴리곤에서도 외부로 빠져나가지 않습니다."
+        )
+        saved_rep_checked = self.settings.value("AddressMatcher/rep_point_mode", "false") == "true"
+        self.rep_point_checkbox.setChecked(saved_rep_checked)
+        self.rep_point_checkbox.toggled.connect(self.toggle_rep_point_fields)
+        self.form_layout.addRow("", self.rep_point_checkbox)
+        
+        # 2-9. 대표점 생성용 Polygon 레이어 선택
+        self.rep_point_layer_combo = QgsMapLayerComboBox()
+        self.rep_point_layer_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+        self.form_layout.addRow(self.create_label("대표점 생성 레이어:", "rep_layer"), self.rep_point_layer_combo)
         
         # 2-8. 출력 파일 경로 접두사
         self.output_layout = QHBoxLayout()
@@ -281,7 +291,7 @@ class AddressMatcherDialog(QDialog):
             
         # 첫 화면에 필드 활성화 상태 반영
         self.toggle_validation_fields(self.validation_checkbox.isChecked())
-        self.toggle_cadastral_fields(self.cadastral_checkbox.isChecked())
+        self.toggle_rep_point_fields(self.rep_point_checkbox.isChecked())
 
     def create_label(self, text, object_name=None):
         label = QLabel(text)
@@ -307,13 +317,13 @@ class AddressMatcherDialog(QDialog):
             if lbl:
                 lbl.setStyleSheet(f"font-weight: bold; font-size: 11px; {opacity_style}")
 
-    def toggle_cadastral_fields(self, enabled):
-        """체크박스 상태에 따라 Vworld API 입력란을 활성화/비활성화합니다."""
-        self.vworld_key_edit.setEnabled(enabled)
+    def toggle_rep_point_fields(self, enabled):
+        """체크박스 상태에 따라 폴리곤 대표점 레이어 선택 위젯을 활성화/비활성화합니다."""
+        self.rep_point_layer_combo.setEnabled(enabled)
         opacity_style = "color: #2D3748;" if enabled else "color: #A0AEC0;"
-        lbl_vworld = self.findChild(QLabel, "lbl_vworld_key")
-        if lbl_vworld:
-            lbl_vworld.setStyleSheet(f"font-weight: bold; font-size: 11px; {opacity_style}")
+        lbl_rep = self.findChild(QLabel, "lbl_rep_layer")
+        if lbl_rep:
+            lbl_rep.setStyleSheet(f"font-weight: bold; font-size: 11px; {opacity_style}")
 
     def on_csv_path_changed(self, file_path):
         """CSV 경로가 바뀌면 파일을 신속하게 파싱하여 콤보박스에 컬럼을 주입합니다."""
@@ -412,12 +422,6 @@ class AddressMatcherDialog(QDialog):
                 QMessageBox.warning(self, "입력 오류", "SHP ID 필드명을 입력해 주세요.")
                 return
                 
-        # 지적도 다운로드 모드가 켜진 경우 브이월드 키 필수값 체크
-        if self.cadastral_checkbox.isChecked():
-            if not self.vworld_key_edit.text().strip():
-                QMessageBox.warning(self, "입력 오류", "지적도 다운로드를 위해 Vworld API Key를 입력해 주세요.")
-                return
-                
         self.accept()
 
     def get_values(self):
@@ -429,7 +433,7 @@ class AddressMatcherDialog(QDialog):
             "layer": self.layer_combo.currentLayer() if self.validation_checkbox.isChecked() else None,
             "shp_id_col": self.shp_id_col_edit.text() if self.validation_checkbox.isChecked() else "",
             "api_key": self.api_key_edit.text(),
-            "cadastral_enabled": self.cadastral_checkbox.isChecked(),
-            "vworld_api_key": self.vworld_key_edit.text(),
+            "polygon_rep_point_mode": self.rep_point_checkbox.isChecked(),
+            "rep_point_layer": self.rep_point_layer_combo.currentLayer() if self.rep_point_checkbox.isChecked() else None,
             "output_prefix": self.output_edit.text()
         }

@@ -3,7 +3,6 @@ import csv
 import requests
 import time
 import re
-import json
 from PyQt5.QtCore import Qt, QVariant, QCoreApplication
 from PyQt5.QtWidgets import QAction, QMessageBox, QProgressDialog
 from PyQt5.QtGui import QIcon, QColor
@@ -12,12 +11,10 @@ from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, 
     QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
     QgsField, QgsFeatureRequest, QgsSymbol, QgsSingleSymbolRenderer,
-    QgsSimpleMarkerSymbolLayerBase, QgsSettings, QgsMessageLog, Qgis,
-    QgsFillSymbol
+    QgsSimpleMarkerSymbolLayerBase, QgsSettings, QgsMessageLog, Qgis
 )
 
 from .dialog import AddressMatcherDialog
-from .vworld_wfs import get_cadastral_polygon
 
 class AddressMatcherPlugin:
     def __init__(self, iface):
@@ -29,7 +26,6 @@ class AddressMatcherPlugin:
         # 8비트 아이콘 파일 경로
         icon_path = os.path.join(self.plugin_dir, "icon.png")
         if not os.path.exists(icon_path):
-            # 아이콘이 없을 경우 기본 스타일 아이콘 설정
             icon = QIcon()
         else:
             icon = QIcon(icon_path)
@@ -41,12 +37,10 @@ class AddressMatcherPlugin:
         )
         self.action.triggered.connect(self.run)
         
-        # QGIS Vector 메뉴 아래에 추가
         self.iface.addVectorToolBarIcon(self.action)
         self.iface.addPluginToVectorMenu("Address Matcher & Validator", self.action)
 
     def unload(self):
-        # QGIS 종료 또는 플러그인 비활성화 시 GUI 제거
         self.iface.removePluginVectorMenu("Address Matcher & Validator", self.action)
         self.iface.removeVectorToolBarIcon(self.action)
 
@@ -96,7 +90,7 @@ class AddressMatcherPlugin:
 
     def geocode_address(self, address, api_key):
         """
-        지적도상 특이 지번 오류를 정정하기 위해 정규식 정제 및 
+        지적도상 특이 지번 오류를 정정하기 위해 정규식 정제 및
         다단계 Fallback 지오코딩(정제주소 -> 본번지 -> 행정동 중심점)을 수행합니다.
         """
         if not address or address.strip() == "":
@@ -105,13 +99,11 @@ class AddressMatcherPlugin:
         url = "https://dapi.kakao.com/v2/local/search/address.json"
         headers = {"Authorization": f"KakaoAK {api_key}"}
         
-        # [1단계] 수식어가 정제된 원래 주소로 시도
         cleaned = self.clean_address_text(address)
         lon, lat, status = self._request_geocode(url, headers, cleaned)
         if lon is not None:
             return lon, lat, status
             
-        # [2단계] 본번지 폴백 시도 (가지번 제거)
         fallback_addr = None
         if re.search(r"(\s+\d+)-\d+$", cleaned):
             fallback_addr = re.sub(r"(\s+\d+)-\d+$", r"\1", cleaned)
@@ -123,7 +115,6 @@ class AddressMatcherPlugin:
             if lon is not None:
                 return lon, lat, "FALLBACK_MAIN_JIBUN"
                 
-        # [3단계] 번지를 아예 제거하고 읍/면/동/리 대표 지점으로 폴백 검색
         fallback_town = re.sub(r"(\s+산)?\s+\d+.*$", "", cleaned).strip()
         if fallback_town and fallback_town != cleaned:
             lon, lat, status = self._request_geocode(url, headers, fallback_town)
@@ -137,6 +128,11 @@ class AddressMatcherPlugin:
         if dlg.exec_():
             values = dlg.get_values()
             
+            # 폴리곤 대표점 생성 전용 모드 (CSV/지오코딩 없이 SHP -> Point 변환)
+            if values.get("polygon_rep_point_mode"):
+                self.run_polygon_representative_point(values)
+                return
+            
             csv_path = values["csv_path"]
             address_col = values["address_col"]
             validation_enabled = values["validation_enabled"]
@@ -144,11 +140,8 @@ class AddressMatcherPlugin:
             poly_layer = values["layer"]
             shp_id_col = values["shp_id_col"]
             api_key = values["api_key"]
-            cadastral_enabled = values["cadastral_enabled"]
-            vworld_api_key = values["vworld_api_key"]
             output_prefix = values["output_prefix"]
             
-            # 사용자 설정을 QgsSettings에 저장 (하드코딩 방지 및 편의성 제공)
             settings = QgsSettings()
             settings.setValue("AddressMatcher/csv_path", csv_path)
             settings.setValue("AddressMatcher/address_col", address_col)
@@ -156,11 +149,8 @@ class AddressMatcherPlugin:
             settings.setValue("AddressMatcher/csv_id_col", csv_id_col)
             settings.setValue("AddressMatcher/shp_id_col", shp_id_col)
             settings.setValue("AddressMatcher/api_key", api_key)
-            settings.setValue("AddressMatcher/cadastral_enabled", "true" if cadastral_enabled else "false")
-            settings.setValue("AddressMatcher/vworld_api_key", vworld_api_key)
             settings.setValue("AddressMatcher/output_prefix", output_prefix)
             
-            # 1. CSV 로드 및 지오코딩 수행
             rows = []
             try:
                 with open(csv_path, 'r', encoding='utf-8-sig') as f:
@@ -174,16 +164,12 @@ class AddressMatcherPlugin:
             total_rows = len(rows)
             success_count = 0
             
-            # 1-1. 진행 경과 표시를 위한 QProgressDialog 설정
             progress = QProgressDialog("주소 지오코딩을 수행하고 있습니다...", "취소", 0, total_rows, self.iface.mainWindow())
             progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0) # 즉시 표시
+            progress.setMinimumDuration(0)
             progress.setValue(0)
             
-            cadastral_features = []
-            
             for idx, row in enumerate(rows):
-                # 사용자가 취소를 눌렀을 경우 작업 중단
                 if progress.wasCanceled():
                     self.iface.messageBar().pushMessage("Address Matcher", "사용자에 의해 지오코딩 작업이 취소되었습니다.", level=1, duration=3)
                     progress.close()
@@ -198,45 +184,25 @@ class AddressMatcherPlugin:
                 
                 if lon is not None:
                     success_count += 1
-                    # 지적도 기능 활성화된 경우 다운로드 수행
-                    if cadastral_enabled:
-                        progress.setLabelText(f"지적도를 다운로드 중... ({idx+1}/{total_rows})")
-                        QCoreApplication.processEvents()
-                        try:
-                            feat_data = get_cadastral_polygon(lon, lat, vworld_api_key)
-                            if feat_data:
-                                cadastral_features.append(feat_data)
-                        except Exception as e:
-                            QgsMessageLog.logMessage(
-                                f"지적도 다운로드 실패 - 주소: {addr}, 좌표: {lon},{lat}, 에러: {e}",
-                                "AddressMatcher",
-                                Qgis.Warning
-                            )
                 else:
-                    # 지오코딩 실패한 경우 QGIS 로그 메시지 패널에 경고 작성
                     QgsMessageLog.logMessage(
                         f"주소 지오코딩 실패 - 주소: {addr}, 결과상태: {status}",
                         "AddressMatcher",
                         Qgis.Warning
                     )
                 
-                # 프로그레스바 상태 업데이트 및 QGIS UI 먹통 방지
                 progress.setLabelText(f"주소 지오코딩을 수행하고 있습니다... ({idx+1}/{total_rows})")
                 progress.setValue(idx + 1)
                 QCoreApplication.processEvents()
-                
-                # API 호출 간 약간의 지연
                 time.sleep(0.05)
                 
             progress.close()
             self.iface.messageBar().pushMessage("Address Matcher", f"지오코딩 완료: {success_count}/{total_rows} 성공", level=0, duration=3)
             
-            # WGS84 기준 좌표계 설정
             crs_wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
             
             # === 분기 A: 단순 지오코딩 점 생성 모드 ===
             if not validation_enabled:
-                # 결과 CSV 저장
                 csv_out_path = f"{output_prefix}_geocoded.csv"
                 try:
                     if rows:
@@ -249,7 +215,6 @@ class AddressMatcherPlugin:
                 except Exception as e:
                     QMessageBox.critical(self.iface.mainWindow(), "에러", f"결과 CSV 저장 실패:\n{e}")
                 
-                # QGIS 메모리 레이어 생성 및 로드
                 geocoded_layer = QgsVectorLayer("Point?crs=EPSG:4326", "지오코딩 위치 (Geocoded)", "memory")
                 pr = geocoded_layer.dataProvider()
                 pr.addAttributes([
@@ -269,7 +234,7 @@ class AddressMatcherPlugin:
                         geom = QgsGeometry.fromPointXY(QgsPointXY(float(row["lon"]), float(row["lat"])))
                         feat.setGeometry(geom)
                         feat.setAttributes([
-                            row.get(csv_id_col, ""), # ID 컬럼이 없거나 비활성이면 공백 가능
+                            row.get(csv_id_col, ""),
                             row.get(address_col, ""),
                             row.get("geocode_status", ""),
                             float(row["lon"]),
@@ -280,17 +245,11 @@ class AddressMatcherPlugin:
                 pr.addFeatures(features)
                 geocoded_layer.updateExtents()
                 
-                # 파란색 마커 스타일링
                 symbol = QgsSymbol.defaultSymbol(geocoded_layer.geometryType())
                 symbol.setColor(QColor("#3182CE"))
                 symbol.setSize(3.5)
                 geocoded_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
                 
-                # 지적도 레이어 로드 (선택 사항)
-                if cadastral_enabled and cadastral_features:
-                    self.load_cadastral_layer(cadastral_features)
-
-                # 프로젝트 로드 및 줌인
                 QgsProject.instance().addMapLayer(geocoded_layer)
                 canvas = self.iface.mapCanvas()
                 if geocoded_layer.featureCount() > 0:
@@ -308,14 +267,11 @@ class AddressMatcherPlugin:
                 )
                 return
             
-            # === 분기 B: 기존 공간 검증 모드 ===
+            # === 분기 B: 공간 검증 모드 ===
             crs_target = poly_layer.crs()
-            
-            # 좌표 변환기 구축
             transform_to_target = QgsCoordinateTransform(crs_wgs84, crs_target, QgsProject.instance())
             transform_to_wgs84 = QgsCoordinateTransform(crs_target, crs_wgs84, QgsProject.instance())
             
-            # 분석 결과 보관용 리스트
             valid_points = []
             error_points = []
             
@@ -332,7 +288,6 @@ class AddressMatcherPlugin:
                 pt_wgs84 = QgsPointXY(row["lon"], row["lat"])
                 
                 try:
-                    # 1. 포인트 투영 변환
                     pt_target = transform_to_target.transform(pt_wgs84)
                     pt_geom = QgsGeometry.fromPointXY(pt_target)
                 except Exception as e:
@@ -343,7 +298,6 @@ class AddressMatcherPlugin:
                     row["validation_note"] = f"TRANSFORM_ERR_{str(e)[:10]}"
                     continue
                 
-                # 2. 매칭되는 Polygon 피처 검색
                 expr = f'"{shp_id_col}" = \'{csv_id_val}\''
                 request = QgsFeatureRequest().setFilterExpression(expr)
                 features = list(poly_layer.getFeatures(request))
@@ -369,7 +323,6 @@ class AddressMatcherPlugin:
                     error_points.append(row)
                     continue
                 
-                # 3. Point-in-Polygon 검사 및 보정
                 is_inside = pt_geom.within(poly_geom)
                 
                 if is_inside:
@@ -384,6 +337,7 @@ class AddressMatcherPlugin:
                     dist = pt_geom.distance(poly_geom)
                     row["distance_m"] = dist
                     
+                    # pointOnSurface(): 초승달형/오목 폴리곤에서도 반드시 면 내부에 있는 점을 반환
                     rep_geom = poly_geom.pointOnSurface()
                     rep_pt_target = rep_geom.asPoint()
                     rep_pt_wgs84 = transform_to_wgs84.transform(rep_pt_target)
@@ -393,7 +347,6 @@ class AddressMatcherPlugin:
                     row["validation_note"] = "OUTSIDE"
                     error_points.append(row)
             
-            # 3. CSV 파일 출력 저장
             csv_out_path = f"{output_prefix}_results.csv"
             try:
                 if rows:
@@ -405,27 +358,17 @@ class AddressMatcherPlugin:
             except Exception as e:
                 QMessageBox.critical(self.iface.mainWindow(), "에러", f"결과 CSV 저장 실패:\n{e}")
                 
-            # 4. QGIS 지도화면에 포인트 메모리 레이어 로드
-            # 4-1. 정상 레이어 추가
             valid_layer = QgsVectorLayer("Point?crs=EPSG:4326", "정상 위치 (OK)", "memory")
             self.add_points_to_layer(valid_layer, valid_points, is_valid_layer=True)
             
-            # 4-2. 오류 레이어 추가
             error_layer = QgsVectorLayer("Point?crs=EPSG:4326", "경계 이탈 및 보정점 (OUTSIDE)", "memory")
             self.add_points_to_layer(error_layer, error_points, is_valid_layer=False)
             
-            # 5. 스타일링 및 렌더러 적용
             self.style_valid_layer(valid_layer)
             self.style_error_layer(error_layer)
             
-            # 지적도 레이어 로드 (선택 사항)
-            if cadastral_enabled and cadastral_features:
-                self.load_cadastral_layer(cadastral_features)
-
-            # 프로젝트에 레이어 로드
             QgsProject.instance().addMapLayers([valid_layer, error_layer])
             
-            # 생성된 포인트 레이어 범위로 자동 줌인 (Zoom to Layer)
             canvas = self.iface.mapCanvas()
             if len(error_points) > 0 and error_layer.featureCount() > 0:
                 canvas.setExtent(error_layer.extent())
@@ -443,13 +386,164 @@ class AddressMatcherPlugin:
                 f"QGIS 맵 캔버스에 [정상 위치] 및 [경계 이탈] 2개의 레이어가 로드되었습니다."
             )
 
+    def run_polygon_representative_point(self, values):
+        """
+        Polygon SHP 레이어의 각 피처에 대해 pointOnSurface()로 대표점을 계산하여
+        새 포인트 레이어로 출력합니다.
+
+        핵심 알고리즘: QgsGeometry.pointOnSurface()
+        - GEOS 라이브러리의 'Point On Surface' 알고리즘을 내부적으로 사용합니다.
+        - 볼록/오목 구분 없이 항상 폴리곤 면 위에 위치하는 점을 보장합니다.
+        - centroid(무게 중심)와 달리 초승달형·도넛형·ㄷ자형 등 오목 폴리곤에서
+          외부로 빠져나가는 일이 없습니다.
+        - 거대한 필지에서 뻗어나온 조각이 있어도, 그 조각 자체의 면 위에 점이 찍힙니다.
+        """
+        poly_layer = values.get("rep_point_layer")
+        if poly_layer is None or not poly_layer.isValid():
+            QMessageBox.warning(self.iface.mainWindow(), "입력 오류", "유효한 Polygon 레이어를 선택해 주세요.")
+            return
+
+        output_prefix = values.get("output_prefix", "")
+
+        crs_source = poly_layer.crs()
+        crs_wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        transform_to_wgs84 = QgsCoordinateTransform(crs_source, crs_wgs84, QgsProject.instance())
+
+        # 출력 포인트 메모리 레이어 생성 (WGS84)
+        out_layer = QgsVectorLayer("Point?crs=EPSG:4326", "폴리곤 대표점 (pointOnSurface)", "memory")
+        pr = out_layer.dataProvider()
+
+        # 원본 폴리곤 레이어의 모든 필드를 상속 + 대표점 좌표 필드 추가
+        source_fields = poly_layer.fields()
+        pr.addAttributes(source_fields.toList() + [
+            QgsField("rep_lon", QVariant.Double),
+            QgsField("rep_lat", QVariant.Double),
+            QgsField("geom_type", QVariant.String),
+        ])
+        out_layer.updateFields()
+
+        total = poly_layer.featureCount()
+        progress = QProgressDialog(
+            "폴리곤 대표점 계산 중...", "취소", 0, total, self.iface.mainWindow()
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        added = 0
+        skipped = 0
+
+        for idx, poly_feat in enumerate(poly_layer.getFeatures()):
+            if progress.wasCanceled():
+                self.iface.messageBar().pushMessage(
+                    "Address Matcher", "사용자에 의해 작업이 취소되었습니다.", level=1, duration=3
+                )
+                progress.close()
+                return
+
+            poly_geom = poly_feat.geometry()
+
+            if poly_geom is None or poly_geom.isNull() or poly_geom.isEmpty():
+                skipped += 1
+                progress.setValue(idx + 1)
+                QCoreApplication.processEvents()
+                continue
+
+            # 핵심: pointOnSurface() 호출
+            # 초승달형·오목 폴리곤에서도 실제 면이 존재하는 곳 위에 점을 반환합니다.
+            rep_geom_src = poly_geom.pointOnSurface()
+
+            if rep_geom_src.isNull():
+                skipped += 1
+                progress.setValue(idx + 1)
+                QCoreApplication.processEvents()
+                continue
+
+            rep_pt_src = rep_geom_src.asPoint()
+
+            try:
+                rep_pt_wgs84 = transform_to_wgs84.transform(rep_pt_src)
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f"대표점 좌표 변환 실패 (FID={poly_feat.id()}): {e}",
+                    "AddressMatcher", Qgis.Warning
+                )
+                skipped += 1
+                progress.setValue(idx + 1)
+                QCoreApplication.processEvents()
+                continue
+
+            rep_geom_wgs84 = QgsGeometry.fromPointXY(rep_pt_wgs84)
+            geom_type_str = "MultiPolygon" if poly_geom.isMultipart() else "Polygon"
+
+            out_feat = QgsFeature()
+            out_feat.setFields(out_layer.fields())
+            out_feat.setGeometry(rep_geom_wgs84)
+
+            attrs = poly_feat.attributes() + [
+                rep_pt_wgs84.x(),
+                rep_pt_wgs84.y(),
+                geom_type_str,
+            ]
+            out_feat.setAttributes(attrs)
+            pr.addFeatures([out_feat])
+            added += 1
+
+            progress.setLabelText(f"폴리곤 대표점 계산 중... ({idx+1}/{total})")
+            progress.setValue(idx + 1)
+            QCoreApplication.processEvents()
+
+        progress.close()
+        out_layer.updateExtents()
+
+        # 스타일링: 보라색 다이아몬드 마커
+        symbol = QgsSymbol.defaultSymbol(out_layer.geometryType())
+        symbol_layer_obj = symbol.symbolLayer(0)
+        if hasattr(symbol_layer_obj, "setShape"):
+            symbol_layer_obj.setShape(QgsSimpleMarkerSymbolLayerBase.Diamond)
+        symbol.setColor(QColor("#805AD5"))
+        symbol.setSize(4.5)
+        out_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+
+        QgsProject.instance().addMapLayer(out_layer)
+
+        canvas = self.iface.mapCanvas()
+        if out_layer.featureCount() > 0:
+            canvas.setExtent(out_layer.extent())
+            canvas.refresh()
+
+        # 결과 CSV 저장 (선택)
+        if output_prefix:
+            csv_out_path = f"{output_prefix}_rep_points.csv"
+            try:
+                fieldnames = [f.name() for f in out_layer.fields()]
+                with open(csv_out_path, 'w', encoding='utf-8-sig', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    for feat in out_layer.getFeatures():
+                        row = dict(zip(fieldnames, feat.attributes()))
+                        writer.writerow(row)
+                self.iface.messageBar().pushMessage(
+                    "Address Matcher", f"대표점 CSV 저장: {csv_out_path}", level=0, duration=4
+                )
+            except Exception as e:
+                QgsMessageLog.logMessage(f"대표점 CSV 저장 실패: {e}", "AddressMatcher", Qgis.Warning)
+
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "작업 완료",
+            f"폴리곤 대표점 생성이 완료되었습니다.\n\n"
+            f"총 폴리곤: {total}건\n"
+            f" - 대표점 생성 성공: {added}건\n"
+            f" - 건너뜀(빈 지오메트리 등): {skipped}건\n\n"
+            f"[폴리곤 대표점 (pointOnSurface)] 레이어가 QGIS에 로드되었습니다.\n\n"
+            f"※ 초승달형, 오목형 폴리곤도 반드시 실제 면 안에 점이 찍힙니다."
+        )
+
     def add_points_to_layer(self, layer, points_data, is_valid_layer):
-        """
-        임시 메모리 레이어에 포인트 피처들과 속성을 기입합니다.
-        """
+        """임시 메모리 레이어에 포인트 피처들과 속성을 기입합니다."""
         pr = layer.dataProvider()
         
-        # 필드 정의
         pr.addAttributes([
             QgsField("site_id", QVariant.String),
             QgsField("address", QVariant.String),
@@ -468,16 +562,12 @@ class AddressMatcherPlugin:
             feat = QgsFeature()
             feat.setFields(layer.fields())
             
-            # 기하학적 점 생성
             if is_valid_layer:
-                # 정상은 원래 좌표
                 geom = QgsGeometry.fromPointXY(QgsPointXY(float(row["lon"]), float(row["lat"])))
             else:
-                # 오류는 보정된 내부 좌표에 피처를 생성
                 if row["corrected_lon"] != "":
                     geom = QgsGeometry.fromPointXY(QgsPointXY(float(row["corrected_lon"]), float(row["corrected_lat"])))
                 else:
-                    # 지오코딩 실패 등은 원래 좌표 또는 스킵
                     continue
                     
             feat.setGeometry(geom)
@@ -509,7 +599,6 @@ class AddressMatcherPlugin:
     def style_error_layer(self, layer):
         """오류 데이터: 빨간색 X자 마커 적용하여 즉각 구별하도록 함"""
         symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        # 심볼 모양을 X 마커로 설정
         symbol_layer = symbol.symbolLayer(0)
         if hasattr(symbol_layer, 'setShape'):
             symbol_layer.setShape(QgsSimpleMarkerSymbolLayerBase.Cross)
@@ -518,58 +607,3 @@ class AddressMatcherPlugin:
         renderer = QgsSingleSymbolRenderer(symbol)
         layer.setRenderer(renderer)
         layer.triggerRepaint()
-
-    def load_cadastral_layer(self, cadastral_features):
-        """
-        Vworld WFS를 통해 가져온 지적도 GeoJSON 피처 리스트를 QGIS 메모리 레이어로 띄우고 스타일링합니다.
-        """
-        if not cadastral_features:
-            return None
-            
-        cad_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "실제 주소 필지 경계 (지적도)", "memory")
-        cad_pr = cad_layer.dataProvider()
-        
-        # 필드 추가
-        cad_pr.addAttributes([
-            QgsField("pnu", QVariant.String),
-            QgsField("jibun", QVariant.String),
-            QgsField("addr", QVariant.String)
-        ])
-        cad_layer.updateFields()
-        
-        qgs_features = []
-        for feat_dict in cadastral_features:
-            geom_dict = feat_dict.get("geometry")
-            props = feat_dict.get("properties", {})
-            if geom_dict:
-                geom_json = json.dumps(geom_dict)
-                geom = QgsGeometry.fromJson(geom_json)
-                if not geom.isNull():
-                    feat = QgsFeature()
-                    feat.setFields(cad_layer.fields())
-                    feat.setGeometry(geom)
-                    
-                    pnu = props.get("pnu", "")
-                    jibun = props.get("jibun", "")
-                    addr = props.get("addr", "")
-                    
-                    feat.setAttributes([pnu, jibun, addr])
-                    qgs_features.append(feat)
-                    
-        cad_pr.addFeatures(qgs_features)
-        cad_layer.updateExtents()
-        
-        # 스타일링: 채움 투명, 테두리 주황색 점선
-        symbol = QgsFillSymbol.createSimple({
-            'color': '0,0,0,0',
-            'outline_color': '237,137,54',
-            'outline_style': 'dash',
-            'outline_width': '1.2'
-        })
-        renderer = QgsSingleSymbolRenderer(symbol)
-        cad_layer.setRenderer(renderer)
-        cad_layer.triggerRepaint()
-        
-        # 프로젝트에 레이어 로드
-        QgsProject.instance().addMapLayer(cad_layer)
-        return cad_layer
