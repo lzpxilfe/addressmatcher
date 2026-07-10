@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this repository in research, teaching, or applied work, please cite it using the metadata below."
+type: software
+title: "addressmatcher: 유존지역의 대표주소 정하기"
+authors:
+  - family-names: Hwang
+    given-names: Jinseo
+repository-code: "https://github.com/lzpxilfe/addressmatcher"
+url: "https://github.com/lzpxilfe/addressmatcher"
+date-released: 2026-07-10
+abstract: >
+  유존지역의 대표주소 정하기
+keywords:
+  - archaeology
+  - digital archaeology
+  - research software
